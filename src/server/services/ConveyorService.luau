@@ -472,6 +472,21 @@ local ANIMATIONS = {
 
 -- Spawn / movement ------------------------------------------------------
 
+-- Public: run one character's signature animation at the model's current
+-- pivot. Used by the conveyor loop and by EconomyService for carried /
+-- placed brainrots, so every character animates from the same system.
+function ConveyorService.animateModel(model, entry, animT)
+	local animate = ANIMATIONS[entry.animation]
+	if animate == nil or model == nil then
+		return
+	end
+	local pivot = model:GetPivot()
+	local newPivot = animate(model, pivot, animT)
+	if newPivot ~= pivot then
+		model:PivotTo(newPivot)
+	end
+end
+
 local function countActive()
 	local count = 0
 	for _ in pairs(active) do
@@ -491,6 +506,7 @@ function ConveyorService.spawnBrainrot()
 		return nil
 	end
 	local model = ConveyorService.buildCharacterModel(entry, mutation)
+	model:SetAttribute("Uid", record.uid)
 	model:PivotTo(CFrame.new(Config.CONVEYOR_START))
 	model.Parent = conveyorFolder
 	BrainrotData.setBrainrotModel(record.uid, model)
@@ -552,12 +568,8 @@ local function updateConveyor(dt)
 			despawnBrainrot(uid)
 		else
 			local position = Config.CONVEYOR_START + path * progress
-			local pivot = CFrame.new(position)
-			local animate = ANIMATIONS[item.entry.animation]
-			if animate ~= nil then
-				pivot = animate(item.model, pivot, item.animT)
-			end
-			item.model:PivotTo(pivot)
+			item.model:PivotTo(CFrame.new(position))
+			ConveyorService.animateModel(item.model, item.entry, item.animT)
 		end
 	end
 end

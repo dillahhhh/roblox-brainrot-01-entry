@@ -1,15 +1,376 @@
 -- EconomyService.luau -- BRAINROT NUSANTARA (roblox-brainrot-01)
--- TODO (phase 2, 18 Nov): earn ticks, buy, carry, sell, rebirth.
--- DO NOT implement before the foundation is verified.
--- Planned API (all server-authoritative, through BrainrotData):
---   EconomyService.startEarnLoop()  -- 1s tick: addCash(player, getTotalIncome(player))
---   EconomyService.tryBuy(player, uid)  -- cash check -> carry (single ownership state)
---   EconomyService.sellBrainrot(player, uid)
---   EconomyService.tryRebirth(player)  -- cash >= REBIRTH_CASH, server-validated
+-- Economy: one job. Earn ticks, buy / carry / place, sell, rebirth.
+-- All server-authoritative: the client only asks through RemoteFunctions,
+-- every check (cash, distance, ownership, slot, threshold) runs here,
+-- and every change goes through BrainrotData. The server also pushes the
+-- player's state (cash, income, owned, carrying, rebirths) to the HUD
+-- after every change and once per earn tick.
+-- Written for phase 2 (18 Nov 2026).
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Config = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
+local BrainrotCatalog = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("BrainrotCatalog"))
+local BrainrotData = require(script.Parent:WaitForChild("BrainrotData"))
+local BaseService = require(script.Parent:WaitForChild("BaseService"))
+local ConveyorService = require(script.Parent:WaitForChild("ConveyorService"))
+
 local EconomyService = {}
 
-function EconomyService.init()
-	-- Phase 2.
+-- Sell returns half the catalog price.
+local SELL_FRACTION = 0.5
+-- Server-side distance checks (client only offers nearer targets; the
+-- extra margin absorbs lag). A player teleporting across the map cannot
+-- buy or place from afar.
+local BUY_DISTANCE = 20
+local PLACE_DISTANCE = 20
+local CARRY_HEIGHT = 3.2
+
+local remotes = nil
+local carriedAnims = {}
+local placedAnims = {}
+
+-- State payload sent to one player's HUD. Never computed on the client.
+function EconomyService.getState(player)
+	local state = BrainrotData.getPlayer(player)
+	if state == nil then
+		return nil
+	end
+	local owned = {}
+	for _, uid in ipairs(state.brainrots) do
+		local record = BrainrotData.getBrainrot(uid)
+		if record ~= nil and record.state == "placed" then
+			local entry = BrainrotCatalog.getCharacter(record.catalogId)
+			local tier = BrainrotCatalog.getTier(record.tier)
+			table.insert(owned, {
+				uid = uid,
+				name = record.name,
+				tier = BrainrotCatalog.getTierName(record.tier),
+				tierColor = tier.color,
+				rate = record.rate * record.mutationMult,
+				mutation = record.mutation,
+				slotIndex = record.slotIndex,
+				sellPrice = math.floor(entry.price * SELL_FRACTION),
+			})
+		end
+	end
+	local carrying = nil
+	if state.carrying ~= nil then
+		local record = BrainrotData.getBrainrot(state.carrying)
+		if record ~= nil then
+			carrying = { uid = record.uid, name = record.name }
+		end
+	end
+	return {
+		cash = state.cash,
+		income = BrainrotData.getTotalIncome(player),
+		rebirths = state.rebirths,
+		multiplier = state.multiplier,
+		baseId = state.baseId,
+		carrying = carrying,
+		owned = owned,
+	}
+end
+
+function EconomyService.sendState(player)
+	if remotes == nil then
+		return
+	end
+	local payload = EconomyService.getState(player)
+	if payload == nil then
+		return
+	end
+	remotes.StateUpdate:FireClient(player, payload)
+end
+
+-- Effect broadcast. targetPlayer == nil means every client.
+local function fireEffect(kind, position, color, targetPlayer)
+	if remotes == nil then
+		return
+	end
+	local payload = { kind = kind, position = position, color = color }
+	if targetPlayer ~= nil then
+		remotes.EffectEvent:FireClient(targetPlayer, payload)
+	else
+		remotes.EffectEvent:FireAllClients(payload)
+	end
+end
+
+-- Buy: cash check -> spend -> off the conveyor -> carried (one ownership
+-- state: the brainrot is nowhere else now). Returns (success, message).
+function EconomyService.tryBuy(player, uid)
+	local state = BrainrotData.getPlayer(player)
+	if state == nil then
+		return false, "State pemain tidak ditemukan."
+	end
+	if state.carrying ~= nil then
+		return false, "Kamu sudah membawa satu brainrot. Taruh dulu di base."
+	end
+	local record = BrainrotData.getBrainrot(uid)
+	if record == nil or record.state ~= "conveyor" then
+		return false, "Brainrot itu sudah tidak di conveyor."
+	end
+	local entry = BrainrotCatalog.getCharacter(record.catalogId)
+	if entry == nil then
+		return false, "Brainrot tidak dikenal."
+	end
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart") or nil
+	if root == nil then
+		return false, "Karakter belum siap."
+	end
+	if record.model == nil or record.model.PrimaryPart == nil then
+		return false, "Brainrot tidak ditemukan."
+	end
+	if (root.Position - record.model.PrimaryPart.Position).Magnitude > BUY_DISTANCE then
+		return false, "Terlalu jauh dari brainrot itu."
+	end
+	if not BrainrotData.spendCash(player, entry.price) then
+		return false, "Uang tidak cukup: butuh $" .. entry.price .. "."
+	end
+	local taken = ConveyorService.removeFromConveyor(uid)
+	if taken == nil then
+		-- Despawned between the check and the take: refund in full.
+		BrainrotData.addCash(player, entry.price)
+		return false, "Brainrot itu keburu pergi."
+	end
+	record.state = "carried"
+	record.owner = player
+	state.carrying = uid
+	carriedAnims[uid] = 0
+	EconomyService.sendState(player)
+	fireEffect("buy", root.Position + Vector3.new(0, 3, 0), BrainrotCatalog.getTier(record.tier).color)
+	return true, "Membeli " .. entry.name .. " seharga $" .. entry.price .. ". Bawa ke base!"
+end
+
+-- Place: the carried brainrot goes on the first free slot of the
+-- player's own base. The server picks the slot; the client never does.
+function EconomyService.tryPlace(player)
+	local state = BrainrotData.getPlayer(player)
+	if state == nil then
+		return false, "State pemain tidak ditemukan."
+	end
+	local uid = state.carrying
+	if uid == nil then
+		return false, "Kamu tidak membawa brainrot."
+	end
+	local baseId = state.baseId
+	if baseId == nil then
+		return false, "Kamu belum punya base."
+	end
+	local slotIndex = BrainrotData.getFreeSlot(baseId)
+	if slotIndex == nil then
+		return false, "Base penuh! Jual satu brainrot dulu."
+	end
+	local record = BrainrotData.getBrainrot(uid)
+	if record == nil or record.model == nil then
+		return false, "Brainrot yang dibawa hilang."
+	end
+	local character = player.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart") or nil
+	if root == nil then
+		return false, "Karakter belum siap."
+	end
+	local slotCFrame = BaseService.getSlotCFrame(baseId, slotIndex)
+	if slotCFrame == nil then
+		return false, "Slot tidak ditemukan."
+	end
+	if (root.Position - slotCFrame.Position).Magnitude > PLACE_DISTANCE then
+		return false, "Terlalu jauh dari base."
+	end
+	if not BaseService.placeBrainrot(player, uid, slotIndex) then
+		return false, "Gagal menaruh brainrot."
+	end
+	carriedAnims[uid] = nil
+	placedAnims[uid] = {
+		model = record.model,
+		entry = BrainrotCatalog.getCharacter(record.catalogId),
+		t = 0,
+	}
+	EconomyService.sendState(player)
+	fireEffect("place", slotCFrame.Position, BrainrotCatalog.getTier(record.tier).color)
+	return true, "Ditaruh di base! Sekarang menghasilkan $" .. (record.rate * record.mutationMult) .. "/s."
+end
+
+-- Sell: a placed brainrot back for half its catalog price. Frees the
+-- slot and destroys the model; the brainrot is gone for good.
+function EconomyService.sellBrainrot(player, uid)
+	local state = BrainrotData.getPlayer(player)
+	if state == nil then
+		return false, "State pemain tidak ditemukan."
+	end
+	local record = BrainrotData.getBrainrot(uid)
+	if record == nil or record.state ~= "placed" or record.owner ~= player then
+		return false, "Brainrot itu bukan milikmu atau tidak di base."
+	end
+	local entry = BrainrotCatalog.getCharacter(record.catalogId)
+	if entry == nil then
+		return false, "Brainrot tidak dikenal."
+	end
+	local sellPrice = math.floor(entry.price * SELL_FRACTION)
+	local slotPosition = nil
+	if record.baseId ~= nil and record.slotIndex ~= nil then
+		local slotCFrame = BaseService.getSlotCFrame(record.baseId, record.slotIndex)
+		if slotCFrame ~= nil then
+			slotPosition = slotCFrame.Position
+		end
+	end
+	local model = record.model
+	placedAnims[uid] = nil
+	BaseService.clearSlot(uid)
+	if model ~= nil then
+		model:Destroy()
+	end
+	BrainrotData.addCash(player, sellPrice)
+	EconomyService.sendState(player)
+	if slotPosition ~= nil then
+		fireEffect("sell", slotPosition, Color3.fromRGB(255, 210, 60))
+	end
+	return true, "Terjual " .. record.name .. " +$" .. sellPrice .. "."
+end
+
+-- Rebirth: ONE threshold (concept v3). Cash >= 100.000 resets cash and
+-- all brainrots for a permanent x2 multiplier, stacking.
+function EconomyService.tryRebirth(player)
+	local state = BrainrotData.getPlayer(player)
+	if state == nil then
+		return false, "State pemain tidak ditemukan."
+	end
+	if state.cash < Config.REBIRTH_CASH then
+		return false, "Butuh $" .. Config.REBIRTH_CASH .. " untuk rebirth."
+	end
+	local ownedCopy = {}
+	for _, uid in ipairs(state.brainrots) do
+		table.insert(ownedCopy, uid)
+	end
+	for _, uid in ipairs(ownedCopy) do
+		local record = BrainrotData.getBrainrot(uid)
+		local model = nil
+		if record ~= nil then
+			model = record.model
+		end
+		placedAnims[uid] = nil
+		BaseService.clearSlot(uid)
+		if model ~= nil then
+			model:Destroy()
+		end
+	end
+	state.brainrots = {}
+	if state.carrying ~= nil then
+		local record = BrainrotData.getBrainrot(state.carrying)
+		if record ~= nil then
+			if record.model ~= nil then
+				record.model:Destroy()
+			end
+			record.state = "gone"
+			record.owner = nil
+		end
+		carriedAnims[state.carrying] = nil
+		state.carrying = nil
+	end
+	state.cash = 0
+	BrainrotData.addRebirth(player)
+	EconomyService.sendState(player)
+	local character = player.Character
+	local head = character and character:FindFirstChild("Head") or nil
+	if head ~= nil then
+		fireEffect("rebirth", head.Position, Color3.fromRGB(255, 215, 0))
+	end
+	return true, "REBIRTH! Multiplier sekarang x" .. state.multiplier .. "."
+end
+
+-- Called from Main.server on PlayerRemoving, before BrainrotData forgets
+-- the player: destroy the carried model so it never hangs in the world.
+-- (Phase 3 changes this to the disconnect-while-carrying rule: the
+-- brainrot returns to the conveyor or becomes a crate, never vanishes.)
+function EconomyService.releaseCarried(player)
+	local state = BrainrotData.getPlayer(player)
+	if state == nil or state.carrying == nil then
+		return
+	end
+	local record = BrainrotData.getBrainrot(state.carrying)
+	if record ~= nil and record.model ~= nil then
+		record.model:Destroy()
+	end
+	carriedAnims[state.carrying] = nil
+	state.carrying = nil
+end
+
+-- Phase 3 hook: StealService calls this when a brainrot leaves its slot
+-- by stealing, so the placed-animation loop stops tracking it.
+function EconomyService.unregisterPlaced(uid)
+	placedAnims[uid] = nil
+end
+
+-- Earn loop: every second each placed brainrot pays rate x mutation x
+-- rebirth multiplier into its owner's cash, then the HUD is pushed.
+local function earnLoop()
+	while true do
+		task.wait(1)
+		for _, player in ipairs(Players:GetPlayers()) do
+			local income = BrainrotData.getTotalIncome(player)
+			if income > 0 then
+				BrainrotData.addCash(player, income)
+			end
+			EconomyService.sendState(player)
+		end
+	end
+end
+
+-- Carry / placed animation loop: carried models hover above the owner's
+-- head (anchored parts moved by PivotTo, never welded), placed models
+-- keep their signature animation on their slot. One Heartbeat, one
+-- animation system (ConveyorService.animateModel).
+local function updateCarried(dt)
+	for _, player in ipairs(Players:GetPlayers()) do
+		local state = BrainrotData.getPlayer(player)
+		if state ~= nil and state.carrying ~= nil then
+			local record = BrainrotData.getBrainrot(state.carrying)
+			local character = player.Character
+			local head = character and character:FindFirstChild("Head") or nil
+			if record ~= nil and record.model ~= nil and head ~= nil then
+				local entry = BrainrotCatalog.getCharacter(record.catalogId)
+				carriedAnims[record.uid] = (carriedAnims[record.uid] or 0) + dt
+				local target = head.CFrame * CFrame.new(0, CARRY_HEIGHT, 0)
+				record.model:PivotTo(target)
+				if entry ~= nil then
+					ConveyorService.animateModel(record.model, entry, carriedAnims[record.uid])
+				end
+			end
+		end
+	end
+	for uid, anim in pairs(placedAnims) do
+		local record = BrainrotData.getBrainrot(uid)
+		if record ~= nil and record.model ~= nil and record.state == "placed" then
+			anim.t = anim.t + dt
+			ConveyorService.animateModel(anim.model, anim.entry, anim.t)
+		else
+			placedAnims[uid] = nil
+		end
+	end
+end
+
+function EconomyService.init(remoteFolder)
+	remotes = remoteFolder
+	remotes.BuyBrainrot.OnServerInvoke = function(player, uid)
+		return EconomyService.tryBuy(player, uid)
+	end
+	remotes.PlaceBrainrot.OnServerInvoke = function(player)
+		return EconomyService.tryPlace(player)
+	end
+	remotes.SellBrainrot.OnServerInvoke = function(player, uid)
+		return EconomyService.sellBrainrot(player, uid)
+	end
+	remotes.Rebirth.OnServerInvoke = function(player)
+		return EconomyService.tryRebirth(player)
+	end
+	remotes.GetState.OnServerInvoke = function(player)
+		return EconomyService.getState(player)
+	end
+	RunService.Heartbeat:Connect(updateCarried)
+	task.spawn(earnLoop)
 end
 
 return EconomyService
