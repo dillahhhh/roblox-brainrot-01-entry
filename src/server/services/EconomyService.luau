@@ -169,10 +169,6 @@ function EconomyService.tryPlace(player)
 	if baseId == nil then
 		return false, "Kamu belum punya base."
 	end
-	local slotIndex = BrainrotData.getFreeSlot(baseId)
-	if slotIndex == nil then
-		return false, "Base penuh! Jual satu brainrot dulu."
-	end
 	local record = BrainrotData.getBrainrot(uid)
 	if record == nil or record.model == nil then
 		return false, "Brainrot yang dibawa hilang."
@@ -185,11 +181,38 @@ function EconomyService.tryPlace(player)
 	if root == nil then
 		return false, "Karakter belum siap."
 	end
-	local slotCFrame = BaseService.getSlotCFrame(baseId, slotIndex)
+	-- FIX (18 Nov 2026, audit fixed6): the client offers place near ANY
+	-- free slot pad (12 studs), but the server used to measure distance
+	-- to the FIRST free slot only — up to ~18 studs from the pad the
+	-- player stands by, so a shown [E] prompt could be refused with
+	-- "Terlalu jauh dari base." Measure the NEAREST free slot instead,
+	-- the same one the client's prompt is standing by.
+	local base = BrainrotData.getBase(baseId)
+	local slotIndex = nil
+	local slotCFrame = nil
+	local bestDist = nil
+	if base ~= nil then
+		for i = 1, Config.BASE_SLOTS do
+			if base.slots[i] == nil then
+				local cf = BaseService.getSlotCFrame(baseId, i)
+				if cf ~= nil then
+					local d = (root.Position - cf.Position).Magnitude
+					if bestDist == nil or d < bestDist then
+						bestDist = d
+						slotIndex = i
+						slotCFrame = cf
+					end
+				end
+			end
+		end
+	end
+	if slotIndex == nil then
+		return false, "Base penuh! Jual satu brainrot dulu."
+	end
 	if slotCFrame == nil then
 		return false, "Slot tidak ditemukan."
 	end
-	if (root.Position - slotCFrame.Position).Magnitude > PLACE_DISTANCE then
+	if bestDist > PLACE_DISTANCE then
 		return false, "Terlalu jauh dari base."
 	end
 	if not BaseService.placeBrainrot(player, uid, slotIndex) then

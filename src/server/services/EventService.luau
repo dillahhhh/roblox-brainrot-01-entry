@@ -304,6 +304,10 @@ local function createCrates()
 			nextCrateId = nextCrateId + 1
 			local model = buildCrateModel(crateId, class, record)
 			local pos = cratePosition(class)
+			-- FIX (18 Nov 2026, audit fixed6): PivotTo put the crate base
+			-- centre at Y=0, so the 2.5-stud base sat half under the plaza
+			-- floor (top 0.55). Lift it so the base bottom rests on the floor.
+			pos = pos + Vector3.new(0, 1.8, 0)
 			model:PivotTo(CFrame.new(pos))
 			model.Parent = cratesFolder
 			record.state = "crate"

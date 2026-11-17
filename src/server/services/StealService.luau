@@ -52,13 +52,17 @@ function StealService.lockBase(player)
 		return false, "Kamu belum punya base.", 0, 0
 	end
 	local lock = locks[state.baseId]
-	if lock ~= nil and lock.cooldownUntil > now() then
-		local remaining = math.ceil(lock.cooldownUntil - now())
-		return false, "Kunci base cooldown: " .. remaining .. " dtk lagi.", 0, remaining
-	end
+	-- FIX (18 Nov 2026, audit fixed6): cooldownUntil is lockedUntil + 60,
+	-- so while the base is locked BOTH conditions were true and the
+	-- cooldown branch won first — the player saw "cooldown" during the
+	-- 30s lock. Check the lock first.
 	if lock ~= nil and lock.lockedUntil > now() then
 		local remaining = math.ceil(lock.lockedUntil - now())
 		return false, "Base sudah terkunci: " .. remaining .. " dtk lagi.", remaining, 0
+	end
+	if lock ~= nil and lock.cooldownUntil > now() then
+		local remaining = math.ceil(lock.cooldownUntil - now())
+		return false, "Kunci base cooldown: " .. remaining .. " dtk lagi.", 0, remaining
 	end
 	locks[state.baseId] = {
 		lockedUntil = now() + Config.LOCK_DURATION,
