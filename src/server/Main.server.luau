@@ -8,6 +8,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 
 -- NOTE (18 Nov 2026, first Studio play-test): Rojo $path maps src/server/
 -- to the Folder ServerScriptService.Server; Main is a Script INSIDE it and
@@ -20,6 +21,39 @@ local ConveyorService = require(script.Parent:WaitForChild("services"):WaitForCh
 local EconomyService = require(script.Parent:WaitForChild("services"):WaitForChild("EconomyService"))
 local StealService = require(script.Parent:WaitForChild("services"):WaitForChild("StealService"))
 local EventService = require(script.Parent:WaitForChild("services"):WaitForChild("EventService"))
+
+-- Spawn-view arch sign: the "PASAR BRAINROT" labels are built here in
+-- code because this Rojo version cannot express a UDim2 Size in
+-- default.project.json (every encoding fails project deserialization).
+-- Back (+Z) faces the spawn pad; Front (-Z) faces the far side.
+local function buildArchSign()
+	local conveyor = Workspace:FindFirstChild("Conveyor")
+	if conveyor == nil then
+		return
+	end
+	local sign = conveyor:FindFirstChild("ArchSign")
+	if sign == nil then
+		return
+	end
+	for _, face in ipairs({ Enum.NormalId.Back, Enum.NormalId.Front }) do
+		local gui = Instance.new("SurfaceGui")
+		gui.Name = "SignGui"
+		gui.Face = face
+		gui.LightInfluence = 0
+		gui.Parent = sign
+		local label = Instance.new("TextLabel")
+		label.Name = "SignText"
+		label.Size = UDim2.new(1, 0, 1, 0)
+		label.BackgroundTransparency = 1
+		label.Font = Enum.Font.GothamBold
+		label.Text = "PASAR BRAINROT"
+		label.TextColor3 = Color3.fromRGB(255, 217, 51)
+		label.TextScaled = true
+		label.Parent = gui
+	end
+end
+
+buildArchSign()
 
 local remotes = ReplicatedStorage:WaitForChild("Remotes")
 

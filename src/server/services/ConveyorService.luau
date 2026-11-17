@@ -637,7 +637,10 @@ local function countActive()
 	return count
 end
 
-function ConveyorService.spawnBrainrot()
+-- Spawn view: the conveyor is busy from second zero. startDistance
+-- (optional, studs along the path) spreads pre-spawned brainrots so
+-- the first thing a player sees is the game, not an empty bridge.
+function ConveyorService.spawnBrainrot(startDistance)
 	if countActive() >= Config.MAX_ON_CONVEYOR then
 		return nil
 	end
@@ -649,14 +652,17 @@ function ConveyorService.spawnBrainrot()
 	end
 	local model = ConveyorService.buildCharacterModel(entry, mutation)
 	model:SetAttribute("Uid", record.uid)
-	model:PivotTo(CFrame.new(pathStart))
+	local distance = startDistance or 0
+	local path = pathFinish - pathStart
+	local position = pathStart + path * (distance / path.Magnitude)
+	model:PivotTo(CFrame.new(position))
 	model.Parent = conveyorFolder
 	BrainrotData.setBrainrotModel(record.uid, model)
 	active[record.uid] = {
 		uid = record.uid,
 		model = model,
 		entry = entry,
-		distance = 0,
+		distance = distance,
 		animT = math.random() * 10,
 	}
 	return record.uid
@@ -802,6 +808,13 @@ function ConveyorService.init()
 	conveyorFolder = Instance.new("Folder")
 	conveyorFolder.Name = "ConveyorBrainrots"
 	conveyorFolder.Parent = Workspace
+	-- Spawn view: 3 brainrots already on the bridge at second zero,
+	-- spread along the path (x -35, -15, +5) so the first view from
+	-- the spawn pad shows the game at work. The 4s spawn timer keeps
+	-- refilling after this.
+	ConveyorService.spawnBrainrot(10)
+	ConveyorService.spawnBrainrot(30)
+	ConveyorService.spawnBrainrot(50)
 	RunService.Heartbeat:Connect(updateConveyor)
 end
 
