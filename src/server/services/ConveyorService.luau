@@ -396,9 +396,10 @@ local BUILDERS = {
 local function addLabel(model, bodyPart, entry, mutation, rate)
 	local gui = Instance.new("BillboardGui")
 	gui.Name = "BrainrotLabel"
-	gui.Size = UDim2.new(0, 180, 0, 56)
+	gui.Size = UDim2.new(0, 150, 0, 48)
 	gui.StudsOffset = Vector3.new(0, 3.5, 0)
-	gui.AlwaysOnTop = true
+	gui.AlwaysOnTop = false
+	gui.MaxDistance = 80
 	gui.Parent = bodyPart
 	local label = Instance.new("TextLabel")
 	label.Size = UDim2.new(1, 0, 1, 0)
