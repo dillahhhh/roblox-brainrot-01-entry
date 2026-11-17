@@ -19,11 +19,13 @@ local baseModels = {}
 
 -- A base is rotated so its sign sits on the far side from the plaza
 -- centre, facing in: yaw = -angle - 90 degrees.
+-- Y = 1: with the Platform as PrimaryPart (set in init), the 2-stud
+-- platform spans Y 0..2, sitting on the plaza floor (top 0.55).
 local function ringCFrame(index)
 	local angle = (index - 1) * (math.pi * 2 / Config.BASE_COUNT)
 	local x = math.cos(angle) * Config.BASE_RING_RADIUS
 	local z = math.sin(angle) * Config.BASE_RING_RADIUS
-	return CFrame.new(x, 0, z) * CFrame.Angles(0, -angle - math.pi / 2, 0)
+	return CFrame.new(x, 1, z) * CFrame.Angles(0, -angle - math.pi / 2, 0)
 end
 
 local function addSignLabel(model, baseId)
@@ -57,6 +59,15 @@ function BaseService.init()
 	for i = 1, Config.BASE_COUNT do
 		local model = template:Clone()
 		model.Name = "Base" .. i
+		-- FIX (18 Nov 2026, buried-base bug): the template has no
+		-- PrimaryPart, so PivotTo used the bounding-box centre (Y 4.25)
+		-- as the pivot and dropped the whole base 4.25 studs under the
+		-- floor — Platform Y -3.25, slots Y -2.0, only the sign stuck
+		-- out. Pin the pivot to the Platform before pivoting.
+		local platform = model:FindFirstChild("Platform")
+		if platform ~= nil then
+			model.PrimaryPart = platform
+		end
 		model:PivotTo(ringCFrame(i))
 		local platform = model:FindFirstChild("Platform")
 		if platform ~= nil then
