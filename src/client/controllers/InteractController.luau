@@ -24,7 +24,12 @@ local INTERACT_DISTANCE = 12
 local PROMPT_INTERVAL = 0.2
 
 local targetUid = nil
-local targetKind = nil -- "buy" or "place"
+local targetKind = nil -- "buy", "place", "crate" or "steal"
+local targetCrateId = nil
+local targetStealUid = nil
+local targetStealVictim = nil
+local stealTargets = {}
+local stealFetchTimer = 0
 
 local function getRoot()
 	local character = player.Character
@@ -110,42 +115,146 @@ local function findNearestPlace(root, state)
 	return false
 end
 
+-- Nearest unclaimed crate in the scramble zone (phase 3). The crate
+-- label carries its class + brainrot, so the prompt reads it straight
+-- off the world.
+local function findNearestCrate(root)
+	local folder = Workspace:FindFirstChild("ScrambleCrates")
+	if folder == nil then
+		return nil, ""
+	end
+	local bestId = nil
+	local bestDist = INTERACT_DISTANCE
+	local bestText = ""
+	for _, model in ipairs(folder:GetChildren()) do
+		if model:IsA("Model") and model.PrimaryPart ~= nil then
+			local crateId = model:GetAttribute("CrateId")
+			if crateId ~= nil then
+				local dist = (root.Position - model.PrimaryPart.Position).Magnitude
+				if dist < bestDist then
+					local text = "Peti"
+					local gui = model.PrimaryPart:FindFirstChild("CrateLabel")
+					if gui ~= nil then
+						local label = gui:FindFirstChildOfClass("TextLabel")
+						if label ~= nil then
+							text = string.gsub(label.Text, "\n", " — ")
+						end
+					end
+					bestDist = dist
+					bestId = crateId
+					bestText = "Tekan [E] untuk membuka " .. text
+				end
+			end
+		end
+	end
+	return bestId, bestText
+end
+
+-- Nearest stealable brainrot from the server's cached list (phase 3).
+local function findNearestSteal(root)
+	local bestUid = nil
+	local bestVictim = nil
+	local bestDist = INTERACT_DISTANCE
+	local bestText = ""
+	for _, target in ipairs(stealTargets) do
+		local dist = (root.Position - target.position).Magnitude
+		if dist < bestDist then
+			bestDist = dist
+			bestUid = target.uid
+			bestVictim = target.victim
+			bestText = "Tekan [E] untuk MENCURI " .. target.name .. " dari " .. target.victim
+		end
+	end
+	return bestUid, bestVictim, bestText
+end
+
+local function clearTargets()
+	targetUid = nil
+	targetKind = nil
+	targetCrateId = nil
+	targetStealUid = nil
+	targetStealVictim = nil
+end
+
 local function updatePrompt()
 	local root = getRoot()
 	if root == nil then
-		targetUid = nil
-		targetKind = nil
+		clearTargets()
 		HudController.setContextPrompt("")
 		return
 	end
 	local state = HudController.getCachedState()
 	if state ~= nil and state.carrying ~= nil and state.baseId ~= nil then
 		if findNearestPlace(root, state) then
-			targetUid = nil
+			clearTargets()
 			targetKind = "place"
 			HudController.setContextPrompt("Tekan [E] untuk menaruh " .. state.carrying.name .. " di base")
 		else
-			targetUid = nil
-			targetKind = nil
+			clearTargets()
 			HudController.setContextPrompt("Bawa " .. state.carrying.name .. " ke base!")
 		end
+		return
+	end
+	-- Crate claim first: the scramble window is time-limited.
+	local crateId, crateText = findNearestCrate(root)
+	if crateId ~= nil then
+		clearTargets()
+		targetCrateId = crateId
+		targetKind = "crate"
+		HudController.setContextPrompt(crateText)
 		return
 	end
 	local uid, text = findNearestBuy(root)
 	targetUid = uid
 	if uid ~= nil then
 		targetKind = "buy"
-	else
-		targetKind = nil
+		targetCrateId = nil
+		targetStealUid = nil
+		targetStealVictim = nil
+		HudController.setContextPrompt(text)
+		return
 	end
-	HudController.setContextPrompt(text)
+	local stealUid, stealVictim, stealText = findNearestSteal(root)
+	if stealUid ~= nil then
+		clearTargets()
+		targetStealUid = stealUid
+		targetStealVictim = stealVictim
+		targetKind = "steal"
+		HudController.setContextPrompt(stealText)
+	else
+		clearTargets()
+		HudController.setContextPrompt("")
+	end
 end
 
 local function onInteract(_, inputState, _inputObject)
 	if inputState ~= Enum.UserInputState.Begin then
 		return Enum.ContextActionResult.Pass
 	end
-	if targetKind == "buy" and targetUid ~= nil then
+	if targetKind == "crate" and targetCrateId ~= nil then
+		local crateId = targetCrateId
+		clearTargets()
+		local ok, success, message = pcall(function()
+			return remotes.ClaimCrate:InvokeServer(crateId)
+		end)
+		if ok then
+			HudController.setPrompt(message or "", 3)
+		else
+			HudController.setPrompt("Gagal menghubungi server.", 3)
+		end
+	elseif targetKind == "steal" and targetStealUid ~= nil and targetStealVictim ~= nil then
+		local uid = targetStealUid
+		local victim = targetStealVictim
+		clearTargets()
+		local ok, success, message = pcall(function()
+			return remotes.TrySteal:InvokeServer(victim, uid)
+		end)
+		if ok then
+			HudController.setPrompt(message or "", 3)
+		else
+			HudController.setPrompt("Gagal menghubungi server.", 3)
+		end
+	elseif targetKind == "buy" and targetUid ~= nil then
 		local uid = targetUid
 		targetUid = nil
 		targetKind = nil
@@ -182,6 +291,20 @@ function InteractController.init()
 		end
 		promptTimer = 0
 		updatePrompt()
+		-- Steal targets come from the server (it knows ownership and
+		-- locks); refresh twice a second, never blocking the prompt.
+		stealFetchTimer = stealFetchTimer + PROMPT_INTERVAL
+		if stealFetchTimer >= 0.5 then
+			stealFetchTimer = 0
+			task.spawn(function()
+				local ok, targets = pcall(function()
+					return remotes.GetStealTargets:InvokeServer()
+				end)
+				if ok and targets ~= nil then
+					stealTargets = targets
+				end
+			end)
+		end
 	end)
 end
 

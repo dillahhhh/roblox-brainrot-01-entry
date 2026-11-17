@@ -22,8 +22,8 @@ BrainrotData.init()
 BaseService.init()
 ConveyorService.init()
 EconomyService.init(remotes)
-StealService.init()
-EventService.init()
+StealService.init(remotes)
+EventService.init(remotes)
 
 local function onPlayerAdded(player)
 	BrainrotData.addPlayer(player)
@@ -41,11 +41,11 @@ end
 Players.PlayerAdded:Connect(onPlayerAdded)
 
 Players.PlayerRemoving:Connect(function(player)
-	-- TODO phase 3: disconnect-while-carrying rule (a carried brainrot
-	-- returns to the conveyor or becomes a crate, never vanishes). For
-	-- now the carried model is destroyed with the player.
+	-- Phase 3 disconnect-while-carrying rule: the carried brainrot
+	-- returns to the conveyor (or becomes a crate if the event already
+	-- marked it washing). It never vanishes.
 	EconomyService.releaseCarried(player)
 	BrainrotData.removePlayer(player)
 end)
 
-print("[BRAINROT NUSANTARA] Server ready -- phase 2 (economy, buy/carry/place, sell, rebirth).")
+print("[BRAINROT NUSANTARA] Server ready -- phase 3 (Pasar Tumpah, steal, lock, slap).")

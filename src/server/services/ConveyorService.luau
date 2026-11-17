@@ -28,6 +28,11 @@ local active = {}
 local conveyorFolder = nil
 local spawnTimer = 0
 local animClock = 0
+-- Phase 3: the event pauses new spawns and reroutes the path.
+local paused = false
+local pathStart = Config.CONVEYOR_START
+local pathFinish = Config.CONVEYOR_FINISH
+local reversed = false
 
 -- Part helper -----------------------------------------------------------
 -- rotation: Vector3 of degrees, or nil. Animated parts carry their base
@@ -507,7 +512,7 @@ function ConveyorService.spawnBrainrot()
 	end
 	local model = ConveyorService.buildCharacterModel(entry, mutation)
 	model:SetAttribute("Uid", record.uid)
-	model:PivotTo(CFrame.new(Config.CONVEYOR_START))
+	model:PivotTo(CFrame.new(pathStart))
 	model.Parent = conveyorFolder
 	BrainrotData.setBrainrotModel(record.uid, model)
 	active[record.uid] = {
@@ -539,6 +544,86 @@ function ConveyorService.getActive()
 	return list
 end
 
+-- Phase 3: pause new spawns (Pasar Tumpah countdown + wave + scramble).
+-- Walkers already on the bridge keep walking.
+function ConveyorService.setPaused(value)
+	paused = value
+end
+
+function ConveyorService.isPaused()
+	return paused
+end
+
+-- Phase 3: reroute the conveyor (Pasar Tumpah step 4). The bridge
+-- reverses direction each event, and the spawn / exit beams swap sides
+-- so the reroute reads in the world, not only in code.
+function ConveyorService.setReversed(value)
+	if value == reversed then
+		return
+	end
+	reversed = value
+	if reversed then
+		pathStart = Config.CONVEYOR_FINISH
+		pathFinish = Config.CONVEYOR_START
+	else
+		pathStart = Config.CONVEYOR_START
+		pathFinish = Config.CONVEYOR_FINISH
+	end
+	local conveyor = Workspace:FindFirstChild("Conveyor")
+	if conveyor ~= nil then
+		local spawnBeam = conveyor:FindFirstChild("SpawnBeam")
+		local exitBeam = conveyor:FindFirstChild("ExitBeam")
+		if spawnBeam ~= nil and exitBeam ~= nil then
+			local pos = spawnBeam.Position
+			spawnBeam.Position = exitBeam.Position
+			exitBeam.Position = pos
+		end
+		local pairs = {
+			{ "SpawnPostL", "ExitPostL" },
+			{ "SpawnPostR", "ExitPostR" },
+		}
+		for _, pair in ipairs(pairs) do
+			local a = conveyor:FindFirstChild(pair[1])
+			local b = conveyor:FindFirstChild(pair[2])
+			if a ~= nil and b ~= nil then
+				local pos = a.Position
+				a.Position = b.Position
+				b.Position = pos
+			end
+		end
+	end
+end
+
+function ConveyorService.isReversed()
+	return reversed
+end
+
+-- Phase 3: disconnect-while-carrying rule. A brainrot its owner dropped
+-- by leaving returns to the start of the bridge and walks again — it
+-- never vanishes. The record and model come back exactly as they were.
+function ConveyorService.returnToConveyor(uid)
+	local record = BrainrotData.getBrainrot(uid)
+	if record == nil or record.model == nil then
+		return false
+	end
+	if active[uid] ~= nil then
+		return false
+	end
+	record.state = "conveyor"
+	record.owner = nil
+	record.washPending = false
+	record.model:PivotTo(CFrame.new(pathStart))
+	record.model.Parent = conveyorFolder
+	active[uid] = {
+		uid = uid,
+		model = record.model,
+		entry = BrainrotCatalog.getCharacter(record.catalogId),
+		distance = 0,
+		animT = math.random() * 10,
+	}
+	return true
+end
+
 local function despawnBrainrot(uid)
 	local item = active[uid]
 	if item == nil then
@@ -553,12 +638,14 @@ end
 
 local function updateConveyor(dt)
 	animClock = animClock + dt
-	spawnTimer = spawnTimer + dt
-	if spawnTimer >= Config.SPAWN_INTERVAL then
-		spawnTimer = 0
-		ConveyorService.spawnBrainrot()
+	if not paused then
+		spawnTimer = spawnTimer + dt
+		if spawnTimer >= Config.SPAWN_INTERVAL then
+			spawnTimer = 0
+			ConveyorService.spawnBrainrot()
+		end
 	end
-	local path = Config.CONVEYOR_FINISH - Config.CONVEYOR_START
+	local path = pathFinish - pathStart
 	local pathLength = path.Magnitude
 	for uid, item in pairs(active) do
 		item.distance = item.distance + Config.CONVEYOR_SPEED * dt
@@ -567,7 +654,7 @@ local function updateConveyor(dt)
 		if progress >= 1 then
 			despawnBrainrot(uid)
 		else
-			local position = Config.CONVEYOR_START + path * progress
+			local position = pathStart + path * progress
 			item.model:PivotTo(CFrame.new(position))
 			ConveyorService.animateModel(item.model, item.entry, item.animT)
 		end

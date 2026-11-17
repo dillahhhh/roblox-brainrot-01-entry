@@ -7,10 +7,12 @@
 -- these same functions in later phases.
 --
 -- Brainrot states: "conveyor" (walking the bridge), "carried" (a player
--- is holding it), "placed" (earning on a base slot), "crate" (washed away
--- by Pasar Tumpah, waiting in the scramble zone), "gone" (despawned).
--- One brainrot is ever in exactly one state: carried brainrots are a
--- single ownership state, never duplicated between conveyor and crate.
+-- is holding it), "placed" (earning on a base slot), "washing" (marked
+-- by Pasar Tumpah, about to become a crate — transient, owned by the
+-- event), "crate" (washed away, waiting in the scramble zone), "gone"
+-- (despawned). One brainrot is ever in exactly one state: carried
+-- brainrots are a single ownership state, never duplicated between
+-- conveyor and crate.
 
 local Config = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("Config"))
 local BrainrotCatalog = require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("BrainrotCatalog"))
@@ -45,13 +47,23 @@ end
 function BrainrotData.removePlayer(player)
 	local state = players[player]
 	if state ~= nil and state.carrying ~= nil then
-		-- TODO phase 3 (disconnect-while-carrying rule): a carried
-		-- brainrot must return to the conveyor or become a crate,
-		-- never vanish. For the foundation it is released to "gone".
+		-- Defensive last resort only: Main.server calls
+		-- EconomyService.releaseCarried first, which returns the
+		-- carried brainrot to the conveyor (or leaves it to the event
+		-- when it is washing). If we ever get here with a carried
+		-- brainrot, it is not washing, so destroy it rather than leak.
 		local carried = brainrots[state.carrying]
 		if carried ~= nil then
-			carried.state = "gone"
-			carried.owner = nil
+			if carried.washPending then
+				-- The event owns it; it becomes a crate, never vanishes.
+				carried.owner = nil
+			else
+				carried.state = "gone"
+				carried.owner = nil
+				if carried.model ~= nil then
+					carried.model:Destroy()
+				end
+			end
 		end
 	end
 	players[player] = nil
@@ -271,6 +283,46 @@ function BrainrotData.unplaceBrainrot(uid)
 	record.baseId = nil
 	record.slotIndex = nil
 	return true
+end
+
+-- Free a brainrot's slot WITHOUT changing its state or owner: the
+-- caller (steal) sets the new state right after. Used when a placed
+-- brainrot changes hands instead of being destroyed.
+function BrainrotData.removeFromSlot(uid)
+	local record = brainrots[uid]
+	if record == nil or record.state ~= "placed" then
+		return false
+	end
+	local base = bases[record.baseId]
+	if base ~= nil and record.slotIndex ~= nil then
+		base.slots[record.slotIndex] = nil
+	end
+	local ownerState = nil
+	if record.owner ~= nil then
+		ownerState = players[record.owner]
+	end
+	if ownerState ~= nil then
+		for i, ownedUid in ipairs(ownerState.brainrots) do
+			if ownedUid == uid then
+				table.remove(ownerState.brainrots, i)
+				break
+			end
+		end
+	end
+	record.baseId = nil
+	record.slotIndex = nil
+	return true
+end
+
+-- Every placed brainrot (for steal targeting).
+function BrainrotData.getPlacedBrainrots()
+	local list = {}
+	for _, record in pairs(brainrots) do
+		if record.state == "placed" then
+			table.insert(list, record)
+		end
+	end
+	return list
 end
 
 -- Total income per second of one player: placed brainrots only, mutation

@@ -141,6 +141,9 @@ function BaseService.placeBrainrot(player, uid, slotIndex)
 	if not BrainrotData.placeBrainrot(player, uid, slotIndex) then
 		return false
 	end
+	-- Placed models live under their base, not the conveyor folder, so
+	-- the client's buy scan never mistakes them for conveyor stock.
+	record.model.Parent = baseModels[baseId]
 	record.model:PivotTo(slotCFrame)
 	return true
 end
@@ -148,6 +151,35 @@ end
 -- Free a slot when its brainrot leaves (steal / sell / rebirth).
 function BaseService.clearSlot(uid)
 	return BrainrotData.unplaceBrainrot(uid)
+end
+
+-- Phase 3: show a base lock on its sign ("Base 3\nDen\n🔒 TERKUNCI").
+-- StealService calls this when a lock starts and when it expires.
+function BaseService.setLockVisual(baseId, locked)
+	local model = baseModels[baseId]
+	if model == nil then
+		return
+	end
+	local sign = model:FindFirstChild("SignBoard")
+	if sign == nil then
+		return
+	end
+	local gui = sign:FindFirstChild("BaseSign")
+	if gui == nil then
+		return
+	end
+	local label = gui:FindFirstChild("OwnerLabel")
+	if label == nil then
+		return
+	end
+	local text = label.Text
+	if locked then
+		if string.find(text, "TERKUNCI", 1, true) == nil then
+			label.Text = text .. "\n🔒 TERKUNCI"
+		end
+	else
+		label.Text = string.gsub(text, "\n🔒 TERKUNCI", "")
+	end
 end
 
 return BaseService

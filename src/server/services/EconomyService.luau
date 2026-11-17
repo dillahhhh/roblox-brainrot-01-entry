@@ -10,6 +10,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
 
 local Config = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"))
 local BrainrotCatalog = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("BrainrotCatalog"))
@@ -31,6 +32,10 @@ local CARRY_HEIGHT = 3.2
 local remotes = nil
 local carriedAnims = {}
 local placedAnims = {}
+-- Carried brainrots live in their own folder, not under
+-- ConveyorBrainrots: the client's buy scan only looks at the conveyor
+-- folder, so a carried brainrot never shows up as buyable.
+local carriedFolder = nil
 
 -- State payload sent to one player's HUD. Never computed on the client.
 function EconomyService.getState(player)
@@ -112,6 +117,9 @@ function EconomyService.tryBuy(player, uid)
 	if record == nil or record.state ~= "conveyor" then
 		return false, "Brainrot itu sudah tidak di conveyor."
 	end
+	if record.washPending then
+		return false, "Brainrot itu sedang hanyut — gelombang datang!"
+	end
 	local entry = BrainrotCatalog.getCharacter(record.catalogId)
 	if entry == nil then
 		return false, "Brainrot tidak dikenal."
@@ -136,6 +144,7 @@ function EconomyService.tryBuy(player, uid)
 		BrainrotData.addCash(player, entry.price)
 		return false, "Brainrot itu keburu pergi."
 	end
+	taken.Parent = carriedFolder
 	record.state = "carried"
 	record.owner = player
 	state.carrying = uid
@@ -167,6 +176,9 @@ function EconomyService.tryPlace(player)
 	local record = BrainrotData.getBrainrot(uid)
 	if record == nil or record.model == nil then
 		return false, "Brainrot yang dibawa hilang."
+	end
+	if record.washPending then
+		return false, "Brainrot itu sedang hanyut!"
 	end
 	local character = player.Character
 	local root = character and character:FindFirstChild("HumanoidRootPart") or nil
@@ -282,20 +294,63 @@ function EconomyService.tryRebirth(player)
 end
 
 -- Called from Main.server on PlayerRemoving, before BrainrotData forgets
--- the player: destroy the carried model so it never hangs in the world.
--- (Phase 3 changes this to the disconnect-while-carrying rule: the
--- brainrot returns to the conveyor or becomes a crate, never vanishes.)
+-- the player. Phase 3 disconnect-while-carrying rule: the brainrot
+-- returns to the conveyor, or stays with the event when it is already
+-- washing (it becomes a crate). It never vanishes.
 function EconomyService.releaseCarried(player)
 	local state = BrainrotData.getPlayer(player)
 	if state == nil or state.carrying == nil then
 		return
 	end
-	local record = BrainrotData.getBrainrot(state.carrying)
-	if record ~= nil and record.model ~= nil then
-		record.model:Destroy()
-	end
-	carriedAnims[state.carrying] = nil
+	local uid = state.carrying
+	local record = BrainrotData.getBrainrot(uid)
 	state.carrying = nil
+	carriedAnims[uid] = nil
+	if record == nil then
+		return
+	end
+	if record.washPending then
+		-- The event owns it now; it becomes a crate in the scramble zone.
+		return
+	end
+	if record.model ~= nil then
+		ConveyorService.returnToConveyor(uid)
+	else
+		record.state = "gone"
+		record.owner = nil
+	end
+end
+
+-- Phase 3 hook: hand a brainrot to a player as carried (crate claim,
+-- steal). The caller validates everything first (not already carrying,
+-- record + model exist); this only books the single ownership state.
+-- model is optional: pass a freshly built one (crate claim), or nil to
+-- reuse the record's current model (steal).
+function EconomyService.giveCarried(player, uid, model)
+	local state = BrainrotData.getPlayer(player)
+	local record = BrainrotData.getBrainrot(uid)
+	if state == nil or record == nil then
+		return false
+	end
+	if model ~= nil then
+		record.model = model
+	end
+	if record.model == nil then
+		return false
+	end
+	record.model.Parent = carriedFolder
+	record.state = "carried"
+	record.owner = player
+	record.washPending = false
+	state.carrying = uid
+	carriedAnims[uid] = 0
+	return true
+end
+
+-- Phase 3 hook: the event clears a carried animation when its brainrot
+-- is marked for washing, so the carry loop stops moving the model.
+function EconomyService.clearCarriedAnim(uid)
+	carriedAnims[uid] = nil
 end
 
 -- Phase 3 hook: StealService calls this when a brainrot leaves its slot
@@ -354,6 +409,12 @@ end
 
 function EconomyService.init(remoteFolder)
 	remotes = remoteFolder
+	carriedFolder = Workspace:FindFirstChild("CarriedBrainrots")
+	if carriedFolder == nil then
+		carriedFolder = Instance.new("Folder")
+		carriedFolder.Name = "CarriedBrainrots"
+		carriedFolder.Parent = Workspace
+	end
 	remotes.BuyBrainrot.OnServerInvoke = function(player, uid)
 		return EconomyService.tryBuy(player, uid)
 	end

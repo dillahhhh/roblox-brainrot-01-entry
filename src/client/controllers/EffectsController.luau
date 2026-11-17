@@ -62,6 +62,34 @@ function EffectsController.playRebirth(position)
 	EffectsController.shakeScreen(0.4)
 end
 
+-- Phase 3: Pasar Tumpah siren (red/blue flash at the plaza centre).
+function EffectsController.playSiren(position)
+	spawnBurst(position, { Color3.fromRGB(255, 60, 60), Color3.fromRGB(80, 160, 255), Color3.fromRGB(255, 255, 255) }, 20, 8, 0.5, 5)
+	EffectsController.shakeScreen(0.3)
+end
+
+-- Phase 3: the flood wave sweeping the plaza.
+function EffectsController.playWave(position)
+	spawnBurst(position, { Color3.fromRGB(40, 140, 255), Color3.fromRGB(140, 220, 255), Color3.fromRGB(255, 255, 255) }, 28, 10, 0.6, 4)
+	EffectsController.shakeScreen(0.6)
+end
+
+-- Phase 3: a crate appearing in the scramble zone, or being claimed.
+function EffectsController.playCrate(position, color)
+	spawnBurst(position, { color, Color3.fromRGB(255, 215, 0), Color3.fromRGB(255, 255, 255) }, 16, 5, 0.4, 3)
+end
+
+-- Phase 3: a steal landing on someone's base.
+function EffectsController.playSteal(position)
+	spawnBurst(position, { Color3.fromRGB(255, 80, 80), Color3.fromRGB(255, 215, 0), Color3.fromRGB(255, 255, 255) }, 16, 5, 0.4, 3)
+end
+
+-- Phase 3: being slapped (fired at the victim only).
+function EffectsController.playSlap(position)
+	spawnBurst(position, { Color3.fromRGB(255, 120, 120), Color3.fromRGB(255, 255, 255) }, 8, 3, 0.4, 2)
+	EffectsController.shakeScreen(0.3)
+end
+
 function EffectsController.playEarnTick(position)
 	spawnBurst(position, { Color3.fromRGB(255, 215, 0) }, 3, 1.5, 0.3, 1.5)
 end
@@ -100,6 +128,16 @@ function EffectsController.init()
 			EffectsController.playRebirth(payload.position)
 		elseif payload.kind == "earn" then
 			EffectsController.playEarnTick(payload.position)
+		elseif payload.kind == "siren" then
+			EffectsController.playSiren(payload.position)
+		elseif payload.kind == "wave" then
+			EffectsController.playWave(payload.position)
+		elseif payload.kind == "crate" then
+			EffectsController.playCrate(payload.position, color)
+		elseif payload.kind == "steal" then
+			EffectsController.playSteal(payload.position)
+		elseif payload.kind == "slap" then
+			EffectsController.playSlap(payload.position)
 		end
 	end)
 end

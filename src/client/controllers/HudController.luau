@@ -8,6 +8,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
 local BrainrotCatalog = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("BrainrotCatalog"))
 
@@ -24,6 +25,10 @@ local rowUids = {}
 local promptLabel = nil
 local nextLabel = nil
 local rebirthButton = nil
+local eventLabel = nil
+local lockButton = nil
+local lockUntil = 0
+local lockCooldownUntil = 0
 local cachedState = nil
 local promptHoldUntil = 0
 
@@ -141,12 +146,12 @@ local function buildGui()
 		row.Text = "● " .. tier.name
 	end
 
-	-- Event timer, top-centre. Static label: phase 3's EventService does
-	-- not expose a phase yet, so there is no countdown to show.
+	-- Event timer, top-centre. Phase 3: live from EventService
+	-- (EventUpdate pushes phase + seconds left every second).
 	local eventPanel = newPanel(gui, "EventPanel", UDim2.new(0, 300, 0, 44), UDim2.new(0.5, -150, 0, 12))
-	local eventLabel = newLabel(eventPanel, "Event", UDim2.new(1, -12, 0, 44), UDim2.new(0, 6, 0, 0), 16, Color3.fromRGB(140, 220, 255))
+	eventLabel = newLabel(eventPanel, "Event", UDim2.new(1, -12, 0, 44), UDim2.new(0, 6, 0, 0), 16, Color3.fromRGB(140, 220, 255))
 	eventLabel.TextXAlignment = Enum.TextXAlignment.Center
-	eventLabel.Text = "🌊 Pasar Tumpah: segera hadir"
+	eventLabel.Text = "🌊 Pasar Tumpah: ..."
 
 	-- Prompt, bottom-centre.
 	promptLabel = Instance.new("TextLabel")
@@ -190,6 +195,48 @@ local function buildGui()
 			end
 		end)
 	end)
+
+	-- Lock button, bottom-left (phase 3): locks your base for 30s,
+	-- then a 60s cooldown. The server enforces; the label below only
+	-- counts down from what the server answered.
+	lockButton = Instance.new("TextButton")
+	lockButton.Name = "LockButton"
+	lockButton.Size = UDim2.new(0, 208, 0, 48)
+	lockButton.Position = UDim2.new(0, 12, 1, -76)
+	lockButton.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+	lockButton.BorderSizePixel = 0
+	lockButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	lockButton.TextSize = 15
+	lockButton.Font = Enum.Font.GothamBold
+	lockButton.Text = "🔒 Kunci Base (30 dtk)"
+	lockButton.Parent = gui
+	lockButton.MouseButton1Click:Connect(function()
+		if remotes == nil then
+			return
+		end
+		task.spawn(function()
+			local ok, success, message, lockRemaining, cooldownRemaining = pcall(function()
+				return remotes.LockBase:InvokeServer()
+			end)
+			if ok then
+				HudController.setPrompt(message or "", 3)
+				if success then
+					lockUntil = os.clock() + (lockRemaining or 0)
+					lockCooldownUntil = os.clock() + (cooldownRemaining or 0)
+				elseif cooldownRemaining ~= nil and cooldownRemaining > 0 then
+					lockCooldownUntil = os.clock() + cooldownRemaining
+				end
+			else
+				HudController.setPrompt("Gagal menghubungi server.", 3)
+			end
+		end)
+	end)
+end
+
+-- "167" -> "2:47".
+local function formatClock(seconds)
+	local s = math.max(0, math.floor(seconds))
+	return math.floor(s / 60) .. ":" .. string.format("%02d", s % 60)
 end
 
 -- Next tier to chase: one above the highest tier the player owns
@@ -250,6 +297,48 @@ function HudController.getCachedState()
 	return cachedState
 end
 
+-- Live Pasar Tumpah status from the server (phase 3): the event label
+-- shows the countdown to the next flood, the 10s warning (placed
+-- brainrots are SAFE), the wave itself, and the scramble window.
+function HudController.applyEventUpdate(payload)
+	if eventLabel == nil or payload == nil then
+		return
+	end
+	local secondsLeft = payload.secondsLeft or 0
+	if payload.phase == "countdown" then
+		eventLabel.Text = "⚠️ PASAR TUMPAH! " .. secondsLeft .. " dtk — yang di conveyor & dibawa bisa hanyut, yang di base AMAN!"
+		eventLabel.TextColor3 = Color3.fromRGB(255, 90, 60)
+	elseif payload.phase == "wave" then
+		eventLabel.Text = "🌊 GELOMBANG DATANG! Berlindung di base!"
+		eventLabel.TextColor3 = Color3.fromRGB(80, 160, 255)
+	elseif payload.phase == "scramble" then
+		eventLabel.Text = "📦 PETI TUMPAH! Rebut di scramble zone — " .. formatClock(secondsLeft)
+		eventLabel.TextColor3 = Color3.fromRGB(255, 210, 60)
+	else
+		eventLabel.Text = "🌊 Pasar Tumpah: " .. formatClock(secondsLeft)
+		eventLabel.TextColor3 = Color3.fromRGB(140, 220, 255)
+	end
+end
+
+-- Lock button countdown, from what the server last answered (display
+-- only; the server enforces the real lock and cooldown).
+local function updateLockButton()
+	if lockButton == nil then
+		return
+	end
+	local now = os.clock()
+	if now < lockUntil then
+		lockButton.Text = "🔒 Terkunci: " .. math.ceil(lockUntil - now) .. " dtk"
+		lockButton.BackgroundColor3 = Color3.fromRGB(40, 120, 200)
+	elseif now < lockCooldownUntil then
+		lockButton.Text = "🔒 Cooldown: " .. math.ceil(lockCooldownUntil - now) .. " dtk"
+		lockButton.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+	else
+		lockButton.Text = "🔒 Kunci Base (30 dtk)"
+		lockButton.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+	end
+end
+
 -- A message prompt that stays for holdSeconds, whatever the context
 -- prompt does. Empty text hides it.
 function HudController.setPrompt(text, holdSeconds)
@@ -280,6 +369,19 @@ function HudController.init()
 		if state ~= nil then
 			HudController.applyState(state)
 		end
+	end)
+	remotes.EventUpdate.OnClientEvent:Connect(function(payload)
+		HudController.applyEventUpdate(payload)
+	end)
+	-- Lock button countdown, twice a second.
+	local lockTimer = 0
+	RunService.Heartbeat:Connect(function(dt)
+		lockTimer = lockTimer + dt
+		if lockTimer < 0.5 then
+			return
+		end
+		lockTimer = 0
+		updateLockButton()
 	end)
 	-- Initial state: ask the server. The join push may predate the
 	-- client, so retry once if the first call lands too early.
