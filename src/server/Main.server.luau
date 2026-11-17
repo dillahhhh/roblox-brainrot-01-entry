@@ -9,12 +9,17 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local BrainrotData = require(script:WaitForChild("services"):WaitForChild("BrainrotData"))
-local BaseService = require(script:WaitForChild("services"):WaitForChild("BaseService"))
-local ConveyorService = require(script:WaitForChild("services"):WaitForChild("ConveyorService"))
-local EconomyService = require(script:WaitForChild("services"):WaitForChild("EconomyService"))
-local StealService = require(script:WaitForChild("services"):WaitForChild("StealService"))
-local EventService = require(script:WaitForChild("services"):WaitForChild("EventService"))
+-- NOTE (18 Nov 2026, first Studio play-test): Rojo $path maps src/server/
+-- to the Folder ServerScriptService.Server; Main is a Script INSIDE it and
+-- services/ is its SIBLING, not its child. The services must be required
+-- through script.Parent — script:WaitForChild("services") never resolves,
+-- Main errors at line 12 and NO service ever initialises (empty dark plaza).
+local BrainrotData = require(script.Parent:WaitForChild("services"):WaitForChild("BrainrotData"))
+local BaseService = require(script.Parent:WaitForChild("services"):WaitForChild("BaseService"))
+local ConveyorService = require(script.Parent:WaitForChild("services"):WaitForChild("ConveyorService"))
+local EconomyService = require(script.Parent:WaitForChild("services"):WaitForChild("EconomyService"))
+local StealService = require(script.Parent:WaitForChild("services"):WaitForChild("StealService"))
+local EventService = require(script.Parent:WaitForChild("services"):WaitForChild("EventService"))
 
 local remotes = ReplicatedStorage:WaitForChild("Remotes")
 
