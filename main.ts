@@ -21,6 +21,12 @@ import { buildDossier } from './vendor/makefun-roblox.ts';
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
+// BRAINROT NUSANTARA (roblox-brainrot-01): a 3D brainrot game in an
+// Indonesian night market at dusk. The entry program below is unchanged
+// from the kit's starter except for this title line: it copies game.rbxl,
+// src/, screenshots/ and PLAY.json to /output and writes dossier.json.
+const GAME_TITLE = 'BRAINROT NUSANTARA';
+
 /** cpSync's filter: leave out every file and directory whose name starts with a dot (.gitkeep, .DS_Store, .git). */
 const notDotted = (path: string): boolean => !basename(path).startsWith('.');
 
@@ -37,3 +43,5 @@ writeFileSync(
   join(out, 'dossier.json'),
   buildDossier(out, { text_max_bytes: 65536, screenshots: { max: 4, max_bytes: 262144 }, max_instances: 500000, scripts_max_source_bytes: 8388608, scripts_max_path_chars: 1048576 }),
 );
+
+console.log(`Handing in ${GAME_TITLE} (roblox-brainrot-01).`);
