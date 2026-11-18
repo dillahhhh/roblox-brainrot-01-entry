@@ -3,6 +3,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local DataStoreService = game:GetService("DataStoreService")
 local TweenService = game:GetService("TweenService")
 local Lighting = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
 
 local PlayerDataStore = nil
 pcall(function()
@@ -71,6 +73,14 @@ UpdateStateEvent.Parent = Remotes
 local ActionEvent = Instance.new("RemoteEvent")
 ActionEvent.Name = "PlayerAction"
 ActionEvent.Parent = Remotes
+
+local FloodEvent = Instance.new("RemoteEvent")
+FloodEvent.Name = "FloodEvent"
+FloodEvent.Parent = Remotes
+
+local DebugFloodEvent = Instance.new("RemoteEvent")
+DebugFloodEvent.Name = "DebugFlood"
+DebugFloodEvent.Parent = Remotes
 
 -- BERSIHKAN BASEPLATE BAWAAN (AMAN TANPA ERROR TERRAIN)
 for _, obj in ipairs(workspace:GetChildren()) do
@@ -745,14 +755,18 @@ local function pickRandomBrainrot()
 end
 
 local nextLaneX = -7.5
+local ConveyorPaused = false -- dijeda saat Pasar Tumpah (warning + banjir)
+local ConveyorDirection = 1 -- 1: spawn z=130 -> jalan ke -155; -1: spawn z=-130 -> jalan ke +155 (dibalik tiap banjir)
 task.spawn(function()
 	while true do
 		task.wait(CONFIG.SpawnInterval)
+		while ConveyorPaused do task.wait(0.5) end
 		local item = pickRandomBrainrot()
 		local part = Instance.new("Part", MapFolder)
 		part.Name = "MarketBrainrot"
+		part:SetAttribute("BrainrotId", item.Id)
 		part.Size = Vector3.new(5.5, 0.5, 5.5)
-		part.Position = Vector3.new(nextLaneX, 0.85, 130)
+		part.Position = Vector3.new(nextLaneX, 0.85, 130 * ConveyorDirection)
 		nextLaneX = -nextLaneX
 		part.Anchored = true
 		part.CanCollide = false
@@ -790,15 +804,384 @@ task.spawn(function()
 			local state = PlayerStates[player.UserId]
 			if not state or state.CarriedItemId ~= nil or state.Money < item.Price then return end
 			purchased = true
+			part:SetAttribute("Purchased", true)
 			state.Money -= item.Price
 			state.CarriedItemId = item.Id
 			attachBrainrotToPlayer(player, item.Id)
 			syncClient(player)
 			part:Destroy()
 		end)
-		local tween = TweenService:Create(part, TweenInfo.new(285 / CONFIG.ConveyorSpeed, Enum.EasingStyle.Linear), {Position = Vector3.new(part.Position.X, 0.85, -155)})
+		local tween = TweenService:Create(part, TweenInfo.new(285 / CONFIG.ConveyorSpeed, Enum.EasingStyle.Linear), {Position = Vector3.new(part.Position.X, 0.85, -155 * ConveyorDirection)})
 		tween:Play()
 		tween.Completed:Connect(function() if part and part.Parent then part:Destroy() end end)
+	end
+end)
+
+-- =====================================================================
+-- PASAR TUMPAH (flood event): tiap 3 menit, sirene -> hitung mundur 10 dtk
+-- -> gelombang banjir menyapu plaza -> brainrot yang belum aman hanyut
+-- jadi peti di scramble zone -> peti bisa direbut (first come, first served).
+-- Yang AMAN: brainrot yang sudah di slot base + brainrot yang dibawa player
+-- yang sudah sampai di dalam base-nya sendiri. BUKAN tsunami laut — ini
+-- banjir pasar (hujan deras / luapan); debris cuma BAJU + PINTU + JENDELA.
+-- Tembok kota TIDAK hanyut, tanpa mobil. Semua state di server.
+-- =====================================================================
+local FLOOD = {
+	Interval = 180,      -- tiap 3 menit
+	FirstDelay = 120,    -- banjir pertama 2 menit setelah server jalan
+	WarningTime = 10,    -- hitung mundur sirene
+	ScrambleTime = 60,   -- peti hidup 60 detik lalu hilang
+	WaveTime = 6,        -- gelombang melintas plaza ~6 detik
+}
+
+local FloodPhase = "Idle" -- Idle | Warning | Flooding | Scramble
+local FloodTimeLeft = FLOOD.FirstDelay
+local FloodDebugTrigger = false
+local FloodCrates = {}
+
+-- Sirene banjir (FIXED25): bunyi saat Warning 10 dtk. Sound di SoundService
+-- = global, terdengar semua pemain dengan volume sama. Asset: "Tornado Siren"
+-- (rbxassetid://792323017, public domain, gratis). Looped agar menutupi
+-- 10 detik Warning; BGM tidak terganggu (Sound terpisah).
+local FloodSiren = Instance.new("Sound")
+FloodSiren.Name = "FloodSiren"
+FloodSiren.SoundId = "rbxassetid://792323017"
+FloodSiren.Volume = 0.6
+FloodSiren.Looped = true
+FloodSiren.Parent = SoundService
+
+local CRATE_CLASSES = {
+	Pasar = {Name = "Peti Pasar", Color = Color3.fromRGB(60, 200, 110)},
+	Pedagang = {Name = "Peti Pedagang", Color = Color3.fromRGB(255, 200, 60)},
+	Tumpah = {Name = "Peti Tumpah", Color = Color3.fromRGB(185, 85, 255)},
+}
+
+-- Kelas peti dari tier brainrot yang hanyut (1 brainrot = 1 peti).
+-- Peti Tumpah dari tier menengah cuma peluang kecil (Epic 25%).
+local function rollCrateClass(rarity)
+	if rarity == "Common" or rarity == "Uncommon" then return "Pasar" end
+	if rarity == "Rare" then return (math.random() < 0.4) and "Pedagang" or "Pasar" end
+	if rarity == "Epic" then return (math.random() < 0.25) and "Tumpah" or "Pedagang" end
+	if rarity == "Legendary" then return (math.random() < 0.5) and "Tumpah" or "Pedagang" end
+	return "Tumpah" -- Mythic, Ultra Rare
+end
+
+local function randomCratePosition(crateClass)
+	if crateClass == "Pasar" then
+		-- dekat base (di luar pintu base, risiko rendah)
+		local side = math.random() < 0.5 and -1 or 1
+		return Vector3.new(side * (44 + math.random() * 10), 0.8, -120 + math.random() * 240)
+	elseif crateClass == "Tumpah" then
+		-- scramble zone terjauh: ujung utara plaza, dekat gerbang (risiko tinggi)
+		return Vector3.new(-28 + math.random() * 56, 0.8, -158 + math.random() * 20)
+	else
+		-- tengah plaza (risiko sedang)
+		return Vector3.new(-28 + math.random() * 56, 0.8, -120 + math.random() * 240)
+	end
+end
+
+local function clampToPlaza(pos)
+	local x = math.max(-75, math.min(75, pos.X))
+	local z = math.max(-160, math.min(165, pos.Z))
+	return Vector3.new(x, 0.8, z)
+end
+
+local function isInsideOwnBase(player)
+	local state = PlayerStates[player.UserId]
+	if not state or not state.BaseIndex then return false end
+	local base = Bases[state.BaseIndex]
+	if not base then return false end
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then return false end
+	local p = root.Position
+	return math.abs(p.X - base.SpawnPos.X) <= 28 and math.abs(p.Z - base.SpawnPos.Z) <= 23
+end
+
+local function spawnCrate(itemId, crateClass, position)
+	local info = CatalogById[itemId]
+	if not info then return end
+	local classInfo = CRATE_CLASSES[crateClass]
+	local crate = Instance.new("Part")
+	crate.Name = "FloodCrate"
+	crate.Size = Vector3.new(4, 3, 4)
+	crate.Position = position + Vector3.new(0, 1.5, 0)
+	crate.Anchored = true
+	crate.CanCollide = false
+	crate.Color = classInfo.Color
+	crate.Material = Enum.Material.WoodPlanks
+	crate:SetAttribute("BrainrotId", itemId)
+	crate:SetAttribute("CrateClass", crateClass)
+	-- FIXED24: tampilkan brainrot di atas peti (sebelumnya peti cuma kotak kosong)
+	-- pola sama seperti conveyor: visual di-parent ke crate, PivotTo di atas tutup peti, Weld
+	-- PrimaryPart di crate.CFrame + 3.6: titik terendah model (~-2.0 di skala 1.6) pas di atas tutup peti (+1.5)
+	local visual = createBrainrotVisualModel(info, 1.6)
+	visual.Parent = crate
+	visual:PivotTo(crate.CFrame * CFrame.new(0, 3.6, 0))
+	local vw = Instance.new("Weld")
+	vw.Part0 = crate
+	vw.Part1 = visual.PrimaryPart
+	vw.C0 = crate.CFrame:Inverse() * visual.PrimaryPart.CFrame
+	vw.C1 = CFrame.new()
+	vw.Parent = crate
+	local bb = Instance.new("BillboardGui", crate)
+	bb.Size = UDim2.new(0, 170, 0, 58)
+	bb.StudsOffset = Vector3.new(0, 7.0, 0) -- FIXED24: naik dari 3.6 supaya label tetap kelihatan di atas model (mirip conveyor 6.8)
+	bb.MaxDistance = 55
+	local txt = Instance.new("TextLabel", bb)
+	txt.Size = UDim2.new(1, 0, 1, 0)
+	txt.BackgroundTransparency = 1
+	txt.Text = classInfo.Name .. " - " .. info.Name .. " [$" .. info.Income .. "/s]"
+	txt.TextColor3 = RARITY_COLORS[info.Rarity] or Color3.new(1, 1, 1)
+	txt.TextStrokeTransparency = 0
+	txt.Font = Enum.Font.FredokaOne
+	txt.TextScaled = true
+	if crateClass == "Tumpah" then
+		local pl = Instance.new("PointLight", crate)
+		pl.Color = Color3.fromRGB(255, 225, 0)
+		pl.Range = 12
+		pl.Brightness = 2
+		local pe = Instance.new("ParticleEmitter", crate)
+		pe.Color = ColorSequence.new(Color3.fromRGB(255, 225, 0))
+		pe.Size = NumberSequence.new(0.3)
+		pe.Rate = 20
+		pe.Lifetime = NumberRange.new(0.6, 1.2)
+		pe.Speed = NumberRange.new(1, 2)
+		pe.SpreadAngle = Vector2.new(360, 360)
+		pe.LightEmission = 1
+	end
+	local prompt = Instance.new("ProximityPrompt", crate)
+	prompt.ObjectText = classInfo.Name .. " - " .. info.Name .. " ($" .. info.Income .. "/s)"
+	prompt.ActionText = "Buka Peti"
+	prompt.HoldDuration = 0.5
+	prompt.MaxActivationDistance = 10
+	local claimed = false
+	prompt.Triggered:Connect(function(player)
+		if claimed then return end
+		local state = PlayerStates[player.UserId]
+		if not state or state.CarriedItemId ~= nil then return end
+		claimed = true
+		state.CarriedItemId = itemId
+		attachBrainrotToPlayer(player, itemId)
+		syncClient(player)
+		crate:Destroy()
+	end)
+	crate.Parent = MapFolder
+	table.insert(FloodCrates, crate)
+end
+
+local function clearFloodCrates()
+	for _, crate in ipairs(FloodCrates) do
+		if crate and crate.Parent then crate:Destroy() end
+	end
+	FloodCrates = {}
+end
+
+local function spawnWaveVisual()
+	-- Dinding air: menyapu plaza utara -> selatan
+	local wave = Instance.new("Part")
+	wave.Name = "FloodWave"
+	wave.Size = Vector3.new(70, 9, 4)
+	wave.Position = Vector3.new(0, 4.5, -170)
+	wave.Anchored = true
+	wave.CanCollide = false
+	wave.Color = Color3.fromRGB(65, 140, 255)
+	wave.Material = Enum.Material.Glass
+	wave.Transparency = 0.35
+	wave.Parent = MapFolder
+	local foam = Instance.new("ParticleEmitter", wave)
+	foam.Color = ColorSequence.new(Color3.fromRGB(230, 245, 255))
+	foam.Size = NumberSequence.new(1.2)
+	foam.Rate = 60
+	foam.Lifetime = NumberRange.new(0.5, 1)
+	foam.Speed = NumberRange.new(2, 4)
+	foam.SpreadAngle = Vector2.new(360, 360)
+	foam.LightEmission = 0.5
+	local waveTween = TweenService:Create(wave, TweenInfo.new(FLOOD.WaveTime, Enum.EasingStyle.Linear), {Position = Vector3.new(0, 4.5, 175)})
+	waveTween:Play()
+	task.delay(FLOOD.WaveTime + 0.5, function() if wave.Parent then wave:Destroy() end end)
+	-- Genangan air di plaza (base tetap kering: lantai base lebih tinggi)
+	local sheet = Instance.new("Part")
+	sheet.Name = "FloodWater"
+	sheet.Size = Vector3.new(130, 0.2, 330)
+	sheet.Position = Vector3.new(0, 0.65, 0)
+	sheet.Anchored = true
+	sheet.CanCollide = false
+	sheet.Color = Color3.fromRGB(65, 140, 255)
+	sheet.Material = Enum.Material.Glass
+	sheet.Transparency = 1
+	sheet.Parent = MapFolder
+	TweenService:Create(sheet, TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Transparency = 0.45}):Play()
+	task.delay(3.5, function()
+		if not sheet.Parent then return end
+		TweenService:Create(sheet, TweenInfo.new(2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {Transparency = 1}):Play()
+		task.delay(2.2, function() if sheet.Parent then sheet:Destroy() end end)
+	end)
+	-- Debris: cuma BAJU + PINTU + JENDELA (tembok kota TIDAK hanyut, tanpa mobil)
+	local debrisFolder = Instance.new("Folder")
+	debrisFolder.Name = "FloodDebris"
+	debrisFolder.Parent = MapFolder
+	local clothesColors = {
+		Color3.fromRGB(220, 60, 60), Color3.fromRGB(255, 200, 60), Color3.fromRGB(65, 140, 255),
+		Color3.fromRGB(80, 200, 110), Color3.fromRGB(255, 150, 200), Color3.fromRGB(255, 140, 40),
+	}
+	for i = 1, 14 do
+		local kind = ({"baju", "pintu", "jendela"})[(i - 1) % 3 + 1]
+		local p = Instance.new("Part")
+		p.Anchored = true
+		p.CanCollide = false
+		if kind == "baju" then
+			p.Size = Vector3.new(2, 0.3, 1.5)
+			p.Color = clothesColors[math.random(#clothesColors)]
+			p.Material = Enum.Material.Fabric
+			p.Position = Vector3.new(math.random(-28, 28), 1, -165 + math.random(-5, 5))
+		elseif kind == "pintu" then
+			p.Size = Vector3.new(2.5, 5, 0.3)
+			p.Color = Color3.fromRGB(140, 95, 55)
+			p.Material = Enum.Material.Wood
+			p.Position = Vector3.new(math.random(-28, 28), 2.5, -165 + math.random(-5, 5))
+		else
+			p.Size = Vector3.new(2, 2, 0.3)
+			p.Color = Color3.fromRGB(180, 220, 245)
+			p.Material = Enum.Material.Glass
+			p.Transparency = 0.25
+			p.Position = Vector3.new(math.random(-28, 28), 2, -165 + math.random(-5, 5))
+		end
+		p.CFrame = CFrame.new(p.Position) * CFrame.Angles(0, math.rad(math.random(-30, 30)), 0)
+		p.Parent = debrisFolder
+	end
+	task.spawn(function()
+		for _ = 1, 60 do
+			task.wait(0.1)
+			for _, p in ipairs(debrisFolder:GetChildren()) do
+				if p:IsA("BasePart") then
+					p.CFrame = p.CFrame * CFrame.new(0, 0, 5.7) * CFrame.Angles(0.02, 0.01, 0)
+				end
+			end
+		end
+		debrisFolder:Destroy()
+	end)
+end
+
+local function applyWaveKnockback()
+	for _, player in ipairs(Players:GetPlayers()) do
+		if not isInsideOwnBase(player) then
+			local char = player.Character
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			if root then
+				root.AssemblyLinearVelocity = Vector3.new(0, 8, 18)
+			end
+		end
+	end
+end
+
+local function runFloodWave()
+	-- 1. Kumpulkan brainrot di conveyor (yang belum dibeli)
+	local washed = {}
+	for _, child in ipairs(MapFolder:GetChildren()) do
+		if child.Name == "MarketBrainrot" and child.Parent and not child:GetAttribute("Purchased") then
+			local id = child:GetAttribute("BrainrotId")
+			if id and CatalogById[id] then
+				table.insert(washed, {ItemId = id})
+			end
+			child:Destroy()
+		end
+	end
+	-- 2. Kumpulkan brainrot yang dibawa player yang belum sampai base
+	for _, player in ipairs(Players:GetPlayers()) do
+		local state = PlayerStates[player.UserId]
+		if state and state.CarriedItemId and not isInsideOwnBase(player) then
+			local char = player.Character
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			local pos = root and root.Position or Vector3.new(0, 4, 0)
+			table.insert(washed, {ItemId = state.CarriedItemId, DropPos = pos})
+			state.CarriedItemId = nil
+			clearCarriedBrainrotVisual(player)
+			syncClient(player)
+		end
+	end
+	-- 3. Reroute conveyor: arah spawn dibalik
+	ConveyorDirection = -ConveyorDirection
+	-- 4. Gelombang + debris + genangan
+	spawnWaveVisual()
+	-- 5. Knockback ringan buat yang di luar base
+	applyWaveKnockback()
+	-- 6. Tunggu gelombang lewat, baru peti muncul dari yang hanyut
+	task.wait(FLOOD.WaveTime + 0.5)
+	-- FIXED24: fallback kalau conveyor kosong saat banjir (tween brainrot sudah
+	-- sampai ujung + di-destroy selama Warning) -> event tetap selalu ada loot:
+	-- 3 peti acak, satu per kelas (Pasar Common/Uncommon, Pedagang Rare/Epic,
+	-- Tumpah Legendary/Mythic/Ultra Rare)
+	if #washed == 0 then
+		spawnCrate(BRAINROT_CATALOG[math.random(1, 2)].Id, "Pasar", randomCratePosition("Pasar"))
+		spawnCrate(BRAINROT_CATALOG[math.random(3, 4)].Id, "Pedagang", randomCratePosition("Pedagang"))
+		spawnCrate(BRAINROT_CATALOG[math.random(5, 7)].Id, "Tumpah", randomCratePosition("Tumpah"))
+	end
+	for _, w in ipairs(washed) do
+		local info = CatalogById[w.ItemId]
+		local class = rollCrateClass(info.Rarity)
+		local pos
+		if w.DropPos then
+			pos = clampToPlaza(w.DropPos)
+		else
+			pos = randomCratePosition(class)
+		end
+		spawnCrate(w.ItemId, class, pos)
+	end
+end
+
+-- Debug (Studio saja): tembak RemoteEvent ini dari command bar Studio buat
+-- memicu banjir langsung tanpa nunggu timer:
+--   game.ReplicatedStorage.GameRemotes.DebugFlood:FireServer()
+DebugFloodEvent.OnServerEvent:Connect(function(player)
+	if RunService:IsStudio() and FloodPhase == "Idle" then
+		FloodDebugTrigger = true
+	end
+end)
+
+-- State machine event (server): Warning 10 dtk -> Flooding -> Scramble 60 dtk -> Idle
+task.spawn(function()
+	task.wait(1)
+	local nextDelay = FLOOD.FirstDelay
+	while true do
+		-- Idle: hitung mundur ke banjir berikutnya
+		FloodPhase = "Idle"
+		FloodSiren:Stop() -- pengaman: sirene tidak boleh bunyi di luar Warning
+		FloodTimeLeft = nextDelay
+		FloodEvent:FireAllClients("Idle", FloodTimeLeft)
+		local waited = 0
+		while waited < nextDelay do
+			task.wait(1)
+			waited += 1
+			FloodTimeLeft = nextDelay - waited
+			if waited % 10 == 0 then FloodEvent:FireAllClients("Idle", FloodTimeLeft) end
+			if FloodDebugTrigger then FloodDebugTrigger = false break end
+		end
+		-- Warning: sirene + hitung mundur 10 dtk, conveyor berhenti spawn
+		FloodPhase = "Warning"
+		ConveyorPaused = true
+		FloodSiren:Play()
+		for t = FLOOD.WarningTime, 1, -1 do
+			FloodTimeLeft = t
+			FloodEvent:FireAllClients("Warning", t)
+			task.wait(1)
+		end
+		-- Flooding: gelombang menyapu plaza
+		FloodPhase = "Flooding"
+		FloodTimeLeft = 0
+		FloodEvent:FireAllClients("Wave", 0)
+		FloodSiren:Stop()
+		runFloodWave()
+		-- Scramble: peti bisa direbut 60 dtk
+		FloodPhase = "Scramble"
+		for t = FLOOD.ScrambleTime, 1, -1 do
+			FloodTimeLeft = t
+			if t == FLOOD.ScrambleTime or t % 5 == 0 then FloodEvent:FireAllClients("Scramble", t) end
+			task.wait(1)
+		end
+		clearFloodCrates()
+		ConveyorPaused = false
+		nextDelay = FLOOD.Interval
 	end
 end)
 
@@ -903,6 +1286,7 @@ Players.PlayerAdded:Connect(function(player)
 		if st and st.CarriedItemId then attachBrainrotToPlayer(player, st.CarriedItemId) end
 	end)
 	syncClient(player)
+	FloodEvent:FireClient(player, FloodPhase, FloodTimeLeft)
 end)
 
 Players.PlayerRemoving:Connect(function(player)

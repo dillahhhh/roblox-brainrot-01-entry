@@ -9,6 +9,7 @@ local player = Players.LocalPlayer
 local Remotes = ReplicatedStorage:WaitForChild("GameRemotes")
 local UpdateStateEvent = Remotes:WaitForChild("UpdateState")
 local ActionEvent = Remotes:WaitForChild("PlayerAction")
+local FloodEvent = Remotes:WaitForChild("FloodEvent")
 
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "PasarNusantaraUI"
@@ -78,6 +79,26 @@ BaseTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
 BaseTitle.Font = Enum.Font.GothamBold
 BaseTitle.TextScaled = true
 BaseTitle.Parent = BasePanel
+
+-- 2b. BANNER PASAR TUMPAH (atas tengah): peringatan banjir + hitung mundur + timer
+local FloodBanner = Instance.new("Frame")
+FloodBanner.Size = UDim2.new(0, 520, 0, 44)
+FloodBanner.Position = UDim2.new(0.5, -260, 0, 64)
+FloodBanner.BackgroundColor3 = Color3.fromRGB(25, 22, 20)
+FloodBanner.BackgroundTransparency = 0.15
+FloodBanner.Parent = ScreenGui
+addCorner(FloodBanner, 12)
+addStroke(FloodBanner, Color3.fromRGB(120, 180, 255), 2)
+
+local FloodBannerLabel = Instance.new("TextLabel")
+FloodBannerLabel.Size = UDim2.new(1, -12, 1, 0)
+FloodBannerLabel.Position = UDim2.new(0, 6, 0, 0)
+FloodBannerLabel.BackgroundTransparency = 1
+FloodBannerLabel.Text = "Pasar Tumpah: --:--"
+FloodBannerLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+FloodBannerLabel.Font = Enum.Font.GothamBold
+FloodBannerLabel.TextScaled = true
+FloodBannerLabel.Parent = FloodBanner
 
 -- 3. PANEL SEDANG MEMEGANG BRAINROT (TENGAH BAWAH)
 local CarryPanel = Instance.new("Frame")
@@ -313,4 +334,46 @@ end)
 player.CharacterAdded:Connect(function(char)
 	local hum = char:WaitForChild("Humanoid")
 	hum.WalkSpeed = isSprinting and SPRINT_SPEED or WALK_SPEED
+end)
+
+-- 8. PASAR TUMPAH: banner peringatan + hitung mundur (dari server)
+local FloodPhase = "Idle"
+local FloodSeconds = 0
+
+local function formatFloodTime(sec)
+	local m = math.floor(sec / 60)
+	local s = sec % 60
+	return string.format("%d:%02d", m, s)
+end
+
+local function refreshFloodBanner()
+	if FloodPhase == "Warning" then
+		FloodBannerLabel.Text = "PASAR TUMPAH! Banjir dalam " .. FloodSeconds .. " dtk - yang di luar base bisa hanyut!"
+		FloodBannerLabel.TextColor3 = Color3.fromRGB(255, 90, 60)
+	elseif FloodPhase == "Flooding" then
+		FloodBannerLabel.Text = "BANJIR! Lari ke base!"
+		FloodBannerLabel.TextColor3 = Color3.fromRGB(90, 170, 255)
+	elseif FloodPhase == "Scramble" then
+		FloodBannerLabel.Text = "Peti bermunculan! Rebut peti sebelum hilang! (" .. formatFloodTime(FloodSeconds) .. ")"
+		FloodBannerLabel.TextColor3 = Color3.fromRGB(255, 220, 90)
+	else
+		FloodBannerLabel.Text = "Pasar Tumpah: " .. formatFloodTime(FloodSeconds)
+		FloodBannerLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	end
+end
+
+FloodEvent.OnClientEvent:Connect(function(phase, seconds)
+	FloodPhase = phase
+	FloodSeconds = seconds or 0
+	refreshFloodBanner()
+end)
+
+task.spawn(function()
+	while true do
+		task.wait(1)
+		if FloodSeconds > 0 then
+			FloodSeconds -= 1
+			refreshFloodBanner()
+		end
+	end
 end)
