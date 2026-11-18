@@ -4,8 +4,10 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SoundService = game:GetService("SoundService")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
 
 local player = Players.LocalPlayer
+local MyBaseIndex = nil -- FIXED26: base sendiri (buat label "Curi" di base orang lain)
 local Remotes = ReplicatedStorage:WaitForChild("GameRemotes")
 local UpdateStateEvent = Remotes:WaitForChild("UpdateState")
 local ActionEvent = Remotes:WaitForChild("PlayerAction")
@@ -186,6 +188,7 @@ end)
 
 -- 5. UPDATE TAMPILAN REAL-TIME
 UpdateStateEvent.OnClientEvent:Connect(function(data)
+	MyBaseIndex = data.BaseIndex
 	MoneyLabel.Text = "$" .. tostring(data.Money)
 	IncomeLabel.Text = "+$" .. data.Income .. "/s - Rebirth " .. data.Rebirths .. "x"
 	RebirthBtn.Text = "Rebirth ($" .. data.RebirthCost .. ")"
@@ -376,4 +379,19 @@ task.spawn(function()
 			refreshFloodBanner()
 		end
 	end
+end)
+
+-- FIXED26 STEAL: prompt pedestal di base orang lain tampil "Curi Brainrot"
+-- (bukan "Jual $X") supaya pemain tahu dia bisa mencuri. Perubahan properti
+-- prompt di client hanya berlaku lokal untuk pemain itu sendiri.
+ProximityPromptService.PromptShown:Connect(function(prompt, inputType)
+	if MyBaseIndex == nil then return end
+	local pedestal = prompt.Parent
+	if not pedestal or not pedestal:IsA("BasePart") then return end
+	local baseFolder = pedestal.Parent
+	if not baseFolder or not baseFolder.Name:match("^Base_%d+$") then return end
+	local baseIndex = tonumber(baseFolder.Name:match("Base_(%d+)"))
+	if not baseIndex or baseIndex == MyBaseIndex then return end
+	if prompt.ObjectText:find("Kosong") then return end
+	prompt.ActionText = "Curi Brainrot"
 end)

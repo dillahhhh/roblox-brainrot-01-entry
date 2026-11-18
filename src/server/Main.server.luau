@@ -634,16 +634,22 @@ for row = 1, 4 do
 				Prompt.Triggered:Connect(function(player)
 					local baseData = Bases[baseIndex]
 					local state = PlayerStates[player.UserId]
-					if not baseData or baseData.Owner ~= player or not state then return end
+					if not baseData or not state then return end
 					local slotObj = baseData.Slots[currentSlotIdx]
-					if slotObj.ItemId == nil and state.CarriedItemId ~= nil then
-						slotObj.ItemId = state.CarriedItemId
-						state.CarriedItemId = nil
-						clearCarriedBrainrotVisual(player)
-						renderSlotVisual(baseIndex, currentSlotIdx)
-						syncClient(player)
-					elseif slotObj.ItemId ~= nil then
-						SellBrainrotFromSlot(player, baseIndex, currentSlotIdx)
+					if baseData.Owner == player then
+						if slotObj.ItemId == nil and state.CarriedItemId ~= nil then
+							slotObj.ItemId = state.CarriedItemId
+							state.CarriedItemId = nil
+							clearCarriedBrainrotVisual(player)
+							renderSlotVisual(baseIndex, currentSlotIdx)
+							syncClient(player)
+						elseif slotObj.ItemId ~= nil then
+							SellBrainrotFromSlot(player, baseIndex, currentSlotIdx)
+						end
+					else
+						-- FIXED26 STEAL: non-owner mengambil brainrot dari pedestal
+						-- orang lain, hanya saat base TIDAK terkunci. Tangan harus kosong.
+						StealBrainrotFromSlot(player, baseIndex, currentSlotIdx)
 					end
 				end)
 				Slots[slotCounter] = {Index = slotCounter, Pedestal = Pedestal, Prompt = Prompt, ItemId = nil, VisualModel = nil}
@@ -741,6 +747,27 @@ function SellBrainrotFromSlot(player, baseIndex, slotIndex)
 	renderSlotVisual(baseIndex, slotIndex)
 	state.Money += refund
 	syncClient(player)
+end
+
+-- FIXED26 STEAL: pencuri mengambil brainrot dari slot base orang lain.
+-- Server-authoritative: tolak kalau base terkunci, slot kosong, tangan
+-- pencuri penuh, atau pencuri ternyata pemilik base. Korban ikut di-sync
+-- supaya HUD-nya (jumlah slot) langsung update.
+function StealBrainrotFromSlot(player, baseIndex, slotIndex)
+	local state = PlayerStates[player.UserId]
+	local base = Bases[baseIndex]
+	if not state or not base or base.Owner == player then return end
+	if base.IsLocked then return end
+	local slot = base.Slots[slotIndex]
+	if not slot or not slot.ItemId then return end
+	if state.CarriedItemId ~= nil then return end
+	local stolenId = slot.ItemId
+	slot.ItemId = nil
+	renderSlotVisual(baseIndex, slotIndex)
+	state.CarriedItemId = stolenId
+	attachBrainrotToPlayer(player, stolenId)
+	syncClient(player)
+	if base.Owner then syncClient(base.Owner) end
 end
 
 local function pickRandomBrainrot()
